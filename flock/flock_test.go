@@ -1,4 +1,4 @@
-package bitcask
+package flock
 
 import (
 	"os"
@@ -6,8 +6,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/gofrs/flock"
 )
 
 var lockerCount int64
@@ -29,13 +27,12 @@ var lockerCount int64
 // returning a value == 0 indicates that TryLock failed.
 
 func lockAndCount(lockpath string) int64 {
-	lock := flock.New(lockpath)
+	lock := New(lockpath)
 	ok, _ := lock.TryLock()
 	if !ok {
 		return 0
 	}
 	defer func() {
-		os.Remove(lock.Path())
 		lock.Unlock()
 	}()
 
@@ -92,7 +89,7 @@ lockloop:
 	}
 }
 
-func TestLock(t *testing.T) {
+func TestRaceLock(t *testing.T) {
 	// test parameters, written in code :
 	//   you may want to tweak these values for testing
 
