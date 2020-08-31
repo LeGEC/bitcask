@@ -2,8 +2,6 @@ package flock
 
 import (
 	"os"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,17 +22,21 @@ func TestTryLock(t *testing.T) {
 	lock1 := New(testLockPath)
 	lock2 := New(testLockPath)
 
+	// 1- take the first lock
 	locked1, err := lock1.TryLock()
 	assert.True(locked1)
 	assert.NoError(err)
 
+	// 2- check that the second lock cannot acquire the lock
 	locked2, err := lock2.TryLock()
 	assert.False(locked2)
-	//assert.Error(err)  // gofrs.Flock.TryLock may return "not locked" without an error value
+	assert.Error(err)
 
+	// 3- release the first lock
 	err = lock1.Unlock()
 	assert.NoError(err)
 
+	// 4- check that the second lock can acquire and then release the lock without error
 	locked2, err = lock2.TryLock()
 	assert.True(locked2)
 	assert.NoError(err)
@@ -49,158 +51,71 @@ func TestLock(t *testing.T) {
 	// make sure there is no present lock when startng this test
 	os.Remove(testLockPath)
 
-	wg := &sync.WaitGroup{}
-	wg.Add(2)
+	syncChan := make(chan bool)
 
-	taken := make(chan struct{})
+	// main goroutine: take lock on testPath
+	lock := New(testLockPath)
 
-	// goroutine 1 : take lock, close "taken" chan to signal that lock is taken, wait a bit, then release lock.
+	err := lock.Lock()
+	assert.NoError(err)
+
 	go func() {
-		defer wg.Done()
-
+		// sub routine:
 		lock := New(testLockPath)
 
-		err := lock.Lock()
-		assert.NoError(err)
-
-		close(taken)
-		<-time.After(time.Millisecond)
-
-		err = lock.Unlock()
-		assert.NoError(err)
-	}()
-
-	// goroutine 2 : wait for the "taken" signal, take the lock, then release it.
-	// lock.Lock() should block until lock is available, so no error should be
-	// returned, and lock should be taken successfully
-	go func() {
-		defer wg.Done()
-
-		<-taken
-
-		lock := New(testLockPath)
-
+		// before entering the block '.Lock()' call, signal we are about to do it
+		// see below : the main goroutine will wait for a small delay before releasing the lock
+		syncChan <- true
+		// '.Lock()' should ultimately return without error :
 		err := lock.Lock()
 		assert.NoError(err)
 
 		err = lock.Unlock()
 		assert.NoError(err)
+
+		close(syncChan)
 	}()
 
-	wg.Wait()
+	// wait for the "ready" signal from the sub routine,
+	<-syncChan
+
+	// after that signal wait for a small delay before releasing the lock
+	<-time.After(100 * time.Microsecond)
+	err = lock.Unlock()
+	assert.NoError(err)
+
+	// wait for the sub routine to finish
+	<-syncChan
 }
 
-var lockerCount int64
+func TestErrorConditions(t *testing.T) {
+	// error conditions implemented in this version :
+	// - you can't release a lock you do not hold
+	// - you can't lock twice the same lock
 
-// lockAndCount tries to take a lock on "lockpath"
-// if it fails : it returns 0 and stop there
-// if it succeeds :
-//   1- it sets a defer function to release the lock in the same fashion as "func (b *Bitcask) Close()"
-//   2- it increments the shared "lockerCount" above
-//   3- it waits for a short amount of time
-//   4- it decrements "lockerCount"
-//   5- it returns the value it has seen at step 2.
-//
-// If the locking and unlocking behave as we expect them to,
-// instructions 1-5 should be in a critical section,
-// and the only possible value at step 2 should be "1".
-//
-// Returning a value > 0 indicates this function successfully acquired the lock,
-// returning a value == 0 indicates that TryLock failed.
-
-func lockAndCount(lockpath string) int64 {
-	lock := New(lockpath)
-	ok, _ := lock.TryLock()
-	if !ok {
-		return 0
-	}
-	defer func() {
-		lock.Unlock()
-	}()
-
-	x := atomic.AddInt64(&lockerCount, 1)
-	// emulate a workload :
-	<-time.After(1 * time.Microsecond)
-	atomic.AddInt64(&lockerCount, -1)
-
-	return x
-}
-
-// locker will call the lock function above in a loop, until one of the following holds :
-//  - reading from the "timeout" channel doesn't block
-//  - the number of calls to "lock()" that indicate the lock was successfully taken reaches "successfullLockCount"
-func locker(t *testing.T, id int, lockPath string, successfulLockCount int, timeout <-chan struct{}) {
-	timedOut := false
-
-	failCount := 0
-	max := int64(0)
-
-lockloop:
-	for successfulLockCount > 0 {
-		select {
-		case <-timeout:
-			timedOut = true
-			break lockloop
-		default:
-		}
-
-		x := lockAndCount(lockPath)
-
-		if x > 0 {
-			// if x indicates the lock was taken : decrement the counter
-			successfulLockCount--
-		}
-
-		if x > 1 {
-			// if x indicates an invalid value : increase the failCount and update max accordingly
-			failCount++
-			if x > max {
-				max = x
-			}
-		}
-	}
-
-	// check failure cases :
-	if timedOut {
-		t.Fail()
-		t.Logf("[runner %02d] timed out", id)
-	}
-	if failCount > 0 {
-		t.Fail()
-		t.Logf("[runner %02d] lockCounter was > 1 on %2.d occasions, max seen value was %2.d", id, failCount, max)
-	}
-}
-
-func TestRaceLock(t *testing.T) {
-	// test parameters, written in code :
-	//   you may want to tweak these values for testing
-
-	goroutines := 20         // number of concurrent "locker" goroutines to launch
-	successfulLockCount := 50                 // how many times a "locker" will successfully take the lock before halting
+	// -- setup
+	assert := assert.New(t)
 
 	// make sure there is no present lock when startng this test
 	os.Remove(testLockPath)
 
-	// timeout implemented in code
-	// (the lock acquisition depends on the behavior of the filesystem,
-	//	avoid sending CI in endless loop if something fishy happens on the test server ...)
-	// tweak this value if needed ; comment out the "close(ch)" instruction below
-	timeout := 10 * time.Second
-	ch := make(chan struct{})
-	go func() {
-		<-time.After(timeout)
-		close(ch)
-	}()
+	lock := New(testLockPath)
 
-	wg := &sync.WaitGroup{}
-	wg.Add(goroutines)
+	// -- run tests :
 
-	for i := 0; i < goroutines; i++ {
-		go func(id int) {
-			locker(t, id, testLockPath, successfulLockCount, ch)
-			wg.Done()
-		}(i)
-	}
+	err := lock.Unlock()
+	assert.Error(err, "you can't release a lock you do not hold")
 
-	wg.Wait()
+	// take the lock once:
+	lock.TryLock()
+
+	locked, err := lock.TryLock()
+	assert.False(locked)
+	assert.Error(err, "you can't lock twice the same lock (using .TryLock())")
+
+	err = lock.Lock()
+	assert.Error(err, "you can't lock twice the same lock (using .Lock())")
+
+	// -- teardown
+	lock.Unlock()
 }

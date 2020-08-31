@@ -89,7 +89,6 @@ func (b *Bitcask) Stats() (stats Stats, err error) {
 func (b *Bitcask) Close() error {
 	defer func() {
 		b.Flock.Unlock()
-		os.Remove(b.Flock.Path())
 	}()
 
 	if err := b.indexer.Save(b.trie, filepath.Join(b.path, "index")); err != nil {
