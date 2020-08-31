@@ -6,7 +6,89 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
+
+// WARNING : this test will delete the file located at "testLockPath". Choose an adequate temporary file name.
+const testLockPath = "/tmp/bitcask_unit_test_lock" // file path to use for the lock
+
+func TestTryLock(t *testing.T) {
+	// test that basic locking functionnalities are consistent
+
+	// make sure there is no present lock when startng this test
+	os.Remove(testLockPath)
+
+	assert := assert.New(t)
+
+	lock1 := New(testLockPath)
+	lock2 := New(testLockPath)
+
+	locked1, err := lock1.TryLock()
+	assert.True(locked1)
+	assert.NoError(err)
+
+	locked2, err := lock2.TryLock()
+	assert.False(locked2)
+	//assert.Error(err)  // gofrs.Flock.TryLock may return "not locked" without an error value
+
+	err = lock1.Unlock()
+	assert.NoError(err)
+
+	locked2, err = lock2.TryLock()
+	assert.True(locked2)
+	assert.NoError(err)
+
+	err = lock2.Unlock()
+	assert.NoError(err)
+}
+
+func TestLock(t *testing.T) {
+	assert := assert.New(t)
+
+	// make sure there is no present lock when startng this test
+	os.Remove(testLockPath)
+
+	wg := &sync.WaitGroup{}
+	wg.Add(2)
+
+	taken := make(chan struct{})
+
+	// goroutine 1 : take lock, close "taken" chan to signal that lock is taken, wait a bit, then release lock.
+	go func() {
+		defer wg.Done()
+
+		lock := New(testLockPath)
+
+		err := lock.Lock()
+		assert.NoError(err)
+
+		close(taken)
+		<-time.After(time.Millisecond)
+
+		err = lock.Unlock()
+		assert.NoError(err)
+	}()
+
+	// goroutine 2 : wait for the "taken" signal, take the lock, then release it.
+	// lock.Lock() should block until lock is available, so no error should be
+	// returned, and lock should be taken successfully
+	go func() {
+		defer wg.Done()
+
+		<-taken
+
+		lock := New(testLockPath)
+
+		err := lock.Lock()
+		assert.NoError(err)
+
+		err = lock.Unlock()
+		assert.NoError(err)
+	}()
+
+	wg.Wait()
+}
 
 var lockerCount int64
 
@@ -93,13 +175,11 @@ func TestRaceLock(t *testing.T) {
 	// test parameters, written in code :
 	//   you may want to tweak these values for testing
 
-	// WARNING : this test will delete the file located at "lockPath". Choose an adequate temporary file name.
-	lockPath := "/tmp/bitcask_unit_test_lock" // file path to use for the lock
-	goroutines := 20                          // number of concurrent "locker" goroutines to launch
+	goroutines := 20         // number of concurrent "locker" goroutines to launch
 	successfulLockCount := 50                 // how many times a "locker" will successfully take the lock before halting
 
 	// make sure there is no present lock when startng this test
-	os.Remove(lockPath)
+	os.Remove(testLockPath)
 
 	// timeout implemented in code
 	// (the lock acquisition depends on the behavior of the filesystem,
@@ -117,7 +197,7 @@ func TestRaceLock(t *testing.T) {
 
 	for i := 0; i < goroutines; i++ {
 		go func(id int) {
-			locker(t, id, lockPath, successfulLockCount, ch)
+			locker(t, id, testLockPath, successfulLockCount, ch)
 			wg.Done()
 		}(i)
 	}
