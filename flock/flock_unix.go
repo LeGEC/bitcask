@@ -1,3 +1,5 @@
+// +build !aix,!windows
+
 package flock
 
 import (
