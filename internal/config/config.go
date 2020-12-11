@@ -8,11 +8,13 @@ import (
 
 // Config contains the bitcask configuration parameters
 type Config struct {
-	MaxDatafileSize int    `json:"max_datafile_size"`
-	MaxKeySize      uint32 `json:"max_key_size"`
-	MaxValueSize    uint64 `json:"max_value_size"`
-	Sync            bool   `json:"sync"`
-	AutoRecovery    bool   `json:"autorecovery"`
+	MaxDatafileSize         int    `json:"max_datafile_size"`
+	MaxKeySize              uint32 `json:"max_key_size"`
+	MaxValueSize            uint64 `json:"max_value_size"`
+	Sync                    bool   `json:"sync"`
+	AutoRecovery            bool   `json:"autorecovery"`
+	DirFileModeBeforeUmask  os.FileMode
+	FileFileModeBeforeUmask os.FileMode
 }
 
 // Load loads a configuration from the given path
@@ -33,23 +35,16 @@ func Load(path string) (*Config, error) {
 
 // Save saves the configuration to the provided path
 func (c *Config) Save(path string) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
-	if err != nil {
-		return err
-	}
 
 	data, err := json.Marshal(c)
 	if err != nil {
 		return err
 	}
 
-	if _, err = f.Write(data); err != nil {
+	err = ioutil.WriteFile(path, data, c.FileFileModeBeforeUmask)
+	if err != nil {
 		return err
 	}
 
-	if err = f.Sync(); err != nil {
-		return err
-	}
-
-	return f.Close()
+	return nil
 }
